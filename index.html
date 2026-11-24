@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>僵尸连连看</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#101e1a;color:#f5eedb;font:16px/1.5 system-ui,sans-serif}
+main{max-width:650px;margin:auto;padding:clamp(16px,4vw,36px)}
+header,.bar,footer{display:flex;align-items:center;justify-content:space-between;gap:8px}
+h1{font-size:clamp(30px,7vw,48px);letter-spacing:-.06em;margin:.3em 0 .1em}
+p{margin:0 0 16px;color:#c0d0bf}
+output{color:#f4c575;font-variant-numeric:tabular-nums;white-space:nowrap}
+.board{position:relative;background:#1c312a;border:1px solid #415a4b;border-radius:16px;padding:4%;margin:16px 0}
+#grid{display:grid;gap:4px}
+button{cursor:pointer;font:inherit;color:inherit}
+.tile{padding:0;aspect-ratio:1;border-radius:9px;border:1px solid #84967d;background:#e2e7d3;color:#1b3027;font-size:clamp(20px,6vw,42px);line-height:1;touch-action:manipulation}
+.tile.selected{background:#ffcc76;box-shadow:inset 0 0 0 3px #a86818}
+.tile.hint{background:#a5eaba;outline:2px dashed #286542;outline-offset:-4px}
+.tile:disabled{visibility:hidden}
+button:focus-visible{outline:3px solid #fc9900;outline-offset:1px}
+nav{display:flex;gap:8px;flex-wrap:wrap}
+nav button{border:1px solid #617668;border-radius:8px;background:#273e33;padding:7px 14px}
+nav button:first-child{background:#e2b672;color:#192b22}
+svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+polyline{fill:none;stroke:#de7828;stroke-width:4;stroke-linejoin:round;stroke-linecap:round}
+#message{min-height:1.5em;margin-top:12px;color:#e5cfaa}
+</style>
+<main>
+<header><h1>僵尸连连看</h1><output id="counter" aria-label="剩余对数"></output></header>
+<p id="rules">点选两个相同图案。连线只能横走或竖走，最多拐两次，也可以沿棋盘外圈绕行。</p>
+<div class="board"><div id="grid" role="group" aria-label="棋盘"></div><svg aria-hidden="true"><polyline id="line"/></svg></div>
+<nav aria-label="游戏操作"><button id="hint">提示一对</button><button id="mix">洗牌</button><button id="restart">重新开局</button></nav>
+<p id="message" role="status"></p>
+</main>
+<script>
+"use strict";
+const ROWS = 6, COLS = 6;
+const ICONS = ["🧟","🧠","🦴","🪦","🦇","🎃","👻","💀","🕷️"];
+const NAMES = ["僵尸","大脑","骨头","墓碑","蝙蝠","南瓜","幽灵","骷髅","蜘蛛"];
+const grid = document.querySelector("#grid");
+const line = document.querySelector("#line");
+const message = document.querySelector("#message");
+let cards = [], tiles = [], selected = null, pending = null;
+const point = i => [Math.floor(i / COLS), i % COLS];
+function shuffle(values) {
+  for (let i = values.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [values[i], values[j]] = [values[j], values[i]];
+  }
+}
+// 枚举中间的行或列。-1 和 ROWS / COLS 是四周的空走廊。
+function route(a, b) {
+  const [r,c] = point(a), [s,t] = point(b);
+  function open(y,x) {
+    if (y < 0 || x < 0 || y >= ROWS || x >= COLS) return true;
+    const i = y * COLS + x;
+    return i === a || i === b || cards[i] === null;
+  }
+  function clear(path) {
+    for (let k = 1; k < path.length; k++) {
+      let [y,x] = path[k-1];
+      const [v,w] = path[k];
+      while (y !== v || x !== w) {
+        y += Math.sign(v-y);
+        x += Math.sign(w-x);
+        if (!open(y,x)) return false;
+      }
+    }
+    return true;
+  }
+  const paths = [];
+  for (let y = -1; y <= ROWS; y++) paths.push([[r,c],[y,c],[y,t],[s,t]]);
+  for (let x = -1; x <= COLS; x++) paths.push([[r,c],[r,x],[s,x],[s,t]]);
+  const length = path => path.slice(1).reduce((n,p,i) =>
+    n + Math.abs(p[0]-path[i][0]) + Math.abs(p[1]-path[i][1]), 0);
+  return paths.sort((u,v) => length(u)-length(v)).find(clear);
+}
+function firstPair(match = true) {
+  for (let a = 0; a < cards.length; a++) {
+    if (cards[a] === null) continue;
+    for (let b = a+1; b < cards.length; b++) {
+      if (cards[b] !== null && (!match || cards[a] === cards[b]) && route(a,b)) return [a,b];
+    }
+  }
+}
+// 死局时找两个几何上能连通的位置，把第一个图案的同伴换到第二个位置。
+function ensureMove() {
+  if (firstPair()) return false;
+  const [a,b] = firstPair(false);
+  const partner = cards.findIndex((value,i) => i !== a && value === cards[a]);
+  [cards[b],cards[partner]] = [cards[partner],cards[b]];
+  return true;
+}
+function paint() {
+  tiles.forEach((tile,i) => {
+    const id = cards[i], [r,c] = point(i);
+    tile.disabled = id === null;
+    tile.textContent = ICONS[id] || "";
+    tile.className = i === selected ? "tile selected" : "tile";
+    tile.setAttribute("aria-pressed", String(i === selected));
+    tile.setAttribute("aria-label", (r+1)+"行"+(c+1)+"列 "+(NAMES[id] || "空格"));
+  });
+  document.querySelector("#counter").textContent = "剩余 "+cards.filter(v => v !== null).length/2+" 对";
+}
+function draw(path) {
+  const bounds = line.parentElement.getBoundingClientRect();
+  const center = tile => {
+    const box = tile.getBoundingClientRect();
+    return [box.x+box.width/2-bounds.x, box.y+box.height/2-bounds.y];
+  };
+  const [x,y] = center(tiles[0]), dx = center(tiles[1])[0]-x, dy = center(tiles[COLS])[1]-y;
+  const clamp = (n,max) => Math.max(5,Math.min(max-5,n));
+  line.setAttribute("points",path.map(([r,c]) => [clamp(x+c*dx,bounds.width),clamp(y+r*dy,bounds.height)].join(",")).join(" "));
+}
+function choose(b) {
+  if (pending !== null || cards[b] === null) return;
+  const a = selected;
+  selected = a === b ? null : b;
+  paint();
+  if (a === null || a === b) {
+    message.textContent = selected === null ? "已取消选择。" : "再选一张相同图案。";
+    return;
+  }
+  const path = cards[a] === cards[b] && route(a,b);
+  if (!path) {
+    message.textContent = "这两张不能相连，已选中后一张。";
+    return;
+  }
+  draw(path);
+  message.textContent = "配对成功！";
+  pending = setTimeout(() => {
+    cards[a] = cards[b] = null;
+    pending = selected = null;
+    line.removeAttribute("points");
+    if (cards.every(v => v === null)) message.textContent = "通关！所有僵尸图案已清空。";
+    else if (ensureMove()) message.textContent = "配对成功，余牌已自动调位，可继续。";
+    paint();
+  }, 260);
+}
+function start() {
+  clearTimeout(pending);
+  pending = selected = null;
+  line.removeAttribute("points");
+  cards = Array.from({length:ROWS*COLS}, (_,i) => Math.floor(i/2) % ICONS.length);
+  shuffle(cards);
+  ensureMove();
+  grid.replaceChildren();
+  grid.style.gridTemplateColumns = "repeat("+COLS+",minmax(0,1fr))";
+  tiles = cards.map((_,i) => {
+    const tile = document.createElement("button");
+    tile.onclick = () => choose(i);
+    grid.append(tile);
+    return tile;
+  });
+  paint();
+  message.textContent = "新局已就绪，点选第一张牌。";
+}
+document.querySelector("#hint").onclick = () => {
+  if (pending !== null) return;
+  const pair = firstPair();
+  if (!pair) return;
+  selected = null;
+  paint();
+  pair.forEach(i => tiles[i].classList.add("hint"));
+  message.textContent = "绿色虚线框里的两张可以相连。";
+};
+document.querySelector("#mix").onclick = () => {
+  const live = cards.filter(v => v !== null);
+  if (!live.length || pending !== null) return;
+  shuffle(live);
+  cards = cards.map(v => v === null ? null : live.pop());
+  ensureMove();
+  selected = null;
+  paint();
+  message.textContent = "余牌已洗好。";
+};
+document.querySelector("#restart").onclick = start;
+start();
+</script>
+</html>
